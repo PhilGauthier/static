@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+        <title>PEERS-XR - Basic Surgical Skills module</title>
+        <style>
+            html, body {
+                overflow: hidden;
+                width: 100%;
+                height: 100%;
+                margin: 0;
+                padding: 0;
+            }
+            #renderCanvas {
+                width: 100%;
+                height: 100%;
+                touch-action: none;
+            }
+        </style>
+    </head>
+<body>
+<!-- Babylon.js -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.6.2/dat.gui.min.js"></script>
+<script src="https://assets.babylonjs.com/generated/Assets.js"></script>
+<script src="https://preview.babylonjs.com/ammo.js"></script>
+<script src="https://preview.babylonjs.com/cannon.js"></script>
+<script src="https://preview.babylonjs.com/Oimo.js"></script>
+<script src="https://preview.babylonjs.com/earcut.min.js"></script>
+<script src="https://preview.babylonjs.com/babylon.js"></script>
+<script src="https://preview.babylonjs.com/materialsLibrary/babylonjs.materials.min.js"></script>
+<script src="https://preview.babylonjs.com/proceduralTexturesLibrary/babylonjs.proceduralTextures.min.js"></script>
+<script src="https://preview.babylonjs.com/postProcessesLibrary/babylonjs.postProcess.min.js"></script>
+<script src="https://preview.babylonjs.com/loaders/babylonjs.loaders.js"></script>
+<script src="https://preview.babylonjs.com/serializers/babylonjs.serializers.min.js"></script>
+<script src="https://preview.babylonjs.com/gui/babylon.gui.min.js"></script>
+<script src="https://preview.babylonjs.com/inspector/babylon.inspector.bundle.js"></script>
+<script src="https://cdn.rawgit.com/PhilGauthier/static/main/meshwriter.min.js"></script>
+
+<canvas id="renderCanvas"></canvas>
+
+<script>	
+	var steps = [{title:'Step 1', desc:'Grab the neede'} 
+		,{title:'Step 2', desc:'Enter the needle perpendicularly to top of the skin'}
+		,{title:'Step 3', desc:'Only supinate wrist until the needle exits completely the skin'}
+		,{title:'Step 4', desc:'Enter the needle perpendicularly to side of the skin'}
+		,{title:'Step 5', desc:'Only supinate wrist until the needle exits completely the skin'}];
+	var currentStep = 0;
+	var scene = null;
+	var root = null;
+	var needleGrabbed = false;
+	var needleGrabbedTime = 0;
+	var textblock = null;
+	
+	var orientMeshTip = null;
+	var armatureRight = null;
+	var armatureLeft = null;
+	var skinMeshRight = null;
+	var skinMeshLeft = null;
+	var skinGap = null;
+	var skinBones = null;
+	var needleHolderTip = null;
+	var needleTip = null;
+	var needleTipMesh = null;
+	var needleTipArrow = null;
+	var needleMesh = null;
+	var needleMeshEverting = null;
+	var needleMeshInverting = null;
+	
+	var targetsRightNode = null;
+	var closestRef = null;
+	var needleHolderMesh = null;
+	var needleHolderBones = null;
+	
+	var highlight=null;
+	var pickedMesh = null;
+	var engine = null;
+	var sceneToRender = null;
+	var gradient = null;
+	var gradientWidth = null;
+	
+	//var Writer = null;
+	var createDefaultEngine = function() { return new BABYLON.Engine(canvas, true, { 			preserveDrawingBuffer: true, stencil: true,  disableWebGL2Support: false}); };
+	
+	const clamp = (num, min, max) => Math.min(Math.max(num, min), max);
+	
+	function smoothstep (min, max, value) {
+	  var x = Math.max(0, Math.min(1, (value-min)/(max-min)));
+	  return x*x*(3 - 2*x);
+	};
+	
+	function GetLabel(string){
+		regex = /([A-Z][a-z0-9]+)/g;
+		var modified = string.replace(regex, function(match) {				
+			return " "+match;
+		});
+		return modified.trim();
+	}
+	function GetID(string){
+		regex = /([A-Z][a-z0-9]+)/g;
+		var modified = string.replace(regex, function(match) {
+			match = match.trim();
+			return match.charAt(0).toUpperCase() + match.slice(1);
+		});
+		return modified.trim();
+	}
+	Number.prototype.map = function (in_min, in_max, out_min, out_max) {
+	  return (this - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+	}
+	
+	function distancePos(node1, node2){
+		var posD = node1.absolutePosition.subtract(node2.absolutePosition).lengthSquared();
+		return smoothstep(0.,0.03,posD);
+	}
+	
+	function distanceRot(node1, node2){		
+		var q1 = node1.absoluteRotationQuaternion;
+		var q2 = node2.absoluteRotationQuaternion;
+		
+		var dot = BABYLON.Quaternion.Dot(q1, q2);		
+		var d = 1.-Math.abs(dot);
+		
+		return d;//smoothstep(0.,0.025,rotD);
+	}
+	
+	function makeGradient(scene, name){
+		tex = scene.getTextureByName(name);
+		if(tex==null){
+			console.log("Texture not found: "+name);
+			return;
+		}
+		tex.readPixels().then((data) => {
+			gradientWidth = tex.getSize().width;
+			gradient = [];
+			for(i = 0 ;i<gradientWidth;i++)
+				gradient.push(new BABYLON.Color3(data[i*4]/255.,data[i*4+1]/255.,data[i*4+2]/255.));                  
+		});
+	}
+	
+	function getGradientColor(value){
+		var colorIdx = Math.ceil(clamp(value,0,1)*(gradientWidth-1));
+		return gradient[colorIdx];
+	}
+	
+	function createText(text, x, y ,z, color="#1C3870", lHeight = .008, lThickness= 0.002){
+		t  = new Writer(text,{"anchor": "left","letter-height": lHeight,"letter-thickness": lThickness,
+                        "color": color,"position": {"x": x,"y": y,"z": z}});
+		t.getMesh().rotation.y = Math.PI;
+		t.getMesh().rotation.x = -Math.PI*.5;
+		t.getMesh().name = GetID(text);
+		return t.getMesh();
+	}
+	
+	var canvas = document.getElementById("renderCanvas");
+
+	var startRenderLoop = function (engine, canvas) {
+		engine.runRenderLoop(function () {
+			if (sceneToRender && sceneToRender.activeCamera) {
+				sceneToRender.render();
+			}
+		});
+	}	
+	
+	var createScene = async function () {	
+		function debug(text){
+			textblock.text = text;
+		}
+		function create3DAxes(scene, name='base', height=1){
+			var base = new BABYLON.TransformNode(name, scene);
+			var arrowX = createArrow(scene, name+"-x", height, new BABYLON.Color3(255, 0, 0));
+			arrowX.rotation.z = Math.PI / 2;
+			var arrowY = createArrow(scene, name+"-y",height);
+			var arrowZ = createArrow(scene, name+"-z",height, new BABYLON.Color3(0, 0, 255));
+			arrowZ.rotation.x = Math.PI / 2;
+			arrowX.parent = base;
+			arrowY.parent = base;
+			arrowZ.parent = base;
+			return base;
+		}
+		function createArrow(scene, name='arrow', height = .3, color = new BABYLON.Color3(0, 255, 0)){
+			const width = height*.02;
+			var arrow = new BABYLON.TransformNode(name, scene);
+			const cylinder = BABYLON.MeshBuilder.CreateCylinder(name+"-cyl", { diameterTop: 0, height: height*.1, diameterBottom: width*5., tessellation: 96 });
+			const line = BABYLON.MeshBuilder.CreateCylinder(name+"-line", { diameterTop: width, height: height*.9, diameterBottom: width, tessellation: 96 }, scene);
+			
+			cylinder.parent = arrow;
+			cylinder.position.y += height*.9;
+			line.parent = arrow;
+			line.position.y += height*.9*.5;
+			
+			const arrowMat = new BABYLON.StandardMaterial('arrowMat', scene); 
+			arrowMat.diffuseColor = color;
+			
+			cylinder.material = arrowMat;			
+			line.material = arrowMat;
+			arrow.material = arrowMat;			
+			
+			return arrow;
+		}
+		function GrabNeedle(grab){
+			//console.log("Grab: "+grab);
+			needleGrabbedTime = Date.now();
+			if(needleGrabbed==grab) return;
+			if(grab){	
+				if(currentStep==0)
+					setCurrentStep(1);
+				needleMesh.setParent(needleHolderTip);
+			}
+			else{
+				needleMesh.setParent(null);
+				if(currentStep==1)
+					setCurrentStep(0);
+			}
+			needleGrabbed = grab;
+		}
+		function updateClosestTarget(){
+			minDist = 100.;
+			closestTarget = targetList[0];
+			targetList.forEach((t)=>{
+				diff = t.absolutePosition.subtract(needleTip.absolutePosition).lengthSquared();
+				if(diff < minDist){
+					closestTarget = t;
+					minDist = diff;
+				}
+			});	
+			//highlight.removeAllMeshes();
+			//highlight.addMesh(closestTarget,  new BABYLON.Color3(0, 1., 0));
+			//closestRef.parent = closestTarget;
+			//closestRef.resetLocalMatrix();
+			p = closestTarget.position;
+			//debug(closestRef.absolutePosition);
+			needleMeshEverting.position.z = p.x-.0478;
+			needleMeshInverting.position.z = p.x-.0478;
+		}
+		BABYLON.Mesh.prototype.rotateAroundPivot = function(pivotPoint, axis, angle) {
+			if(!this._rotationQuaternion) {
+				this._rq = BABYLON.Quaternion.RotationYawPitchRoll(this.rotation.y, this.rotation.x, this.rotation.z);
+			}		
+			var _p = new BABYLON.Quaternion(this.position.x - pivotPoint.x, this.position.y - pivotPoint.y, this.position.z - pivotPoint.z, 0);
+			axis.normalize();
+			var _q = BABYLON.Quaternion.RotationAxis(axis,angle);  //form quaternion rotation		
+			var _qinv = BABYLON.Quaternion.Inverse(_q);	
+			var _pdash = _q.multiply(_p).multiply(_qinv);
+			this.position = new BABYLON.Vector3(pivotPoint.x + _pdash.x, pivotPoint.y + _pdash.y, pivotPoint.z + _pdash.z);
+			this.rotationQuaternion = this._rq.multiply(_q);
+			this._rq = this.rotationQuaternion;
+		}
+		function buildUI(scene){
+			textLoading = createText("Loading...",0.025, hLookup, 0);
+			z = -.25;
+			steps.forEach((s)=>{
+				s.titleMesh = createText(s.title,0.025, hLookup+.202, z, "#1C3870", 0.008);
+				s.titleMesh.setEnabled(false);				
+				s.descMesh = createText(s.desc,0.025, hLookup+.195, z, "#0C2860", 0.006);
+				s.descMesh.setParent(s.titleMesh);
+				//s.descMesh.setEnabled(false);
+			});
+			
+			var anchorBtn = new BABYLON.TransformNode("anchorBtn");
+			anchorBtn.scaling = new BABYLON.Vector3(-.025, .025, -.025);			
+			var panel = new BABYLON.GUI.SpherePanel();
+			panel.margin = 0.2;
+			panel.blockLayout = true;
+			manager.addControl(panel);
+			panel.linkToTransformNode(anchorBtn);
+			anchorBtn.position = new BABYLON.Vector3(0.05, hLookup+.2, z);
+			var buttonReset = new BABYLON.GUI.HolographicButton("buttonReset");
+			buttonReset.text = "Restart";
+			buttonReset.contentResolution = 192;
+			buttonReset.onPointerClickObservable.add(()=> {				
+				reset();
+			});			
+			panel.addControl(buttonReset);
+		}
+		function reset(){
+			location.reload();//setCurrentStep((currentStep+1)%steps.length);			
+		}
+		function setCurrentStep(step){
+			currentStep = step;
+			var i =0;
+			steps.forEach((s)=>{
+				s.titleMesh.setEnabled(i==step);
+				//s.descMesh.setEnabled(i==step);
+				i++;
+			});
+			switch (step) {
+				case 0:
+					skinGap.visibility = 0.;
+					orientMeshTip.setEnabled(false);					
+					needleMeshInverting.visibility = 0;					
+					needleMeshEverting.visibility = 0;
+					needleMesh.material.emissiveColor = new BABYLON.Color3(0, 0, 0);
+					//needleTipArrow.visibility = 0.;
+					//closestRef.visibility = 0.;
+					break;
+				case 1:
+					orientMeshTip.setEnabled(true);
+					needleMeshInverting.visibility = .5;
+					needleMeshEverting.visibility = .5;
+					//needleTipArrow.visibility = 1.;closestRef.visibility = 1.;
+					break;
+				case 2:
+					orientMeshTip.setEnabled(false);
+					needleMesh.material.emissiveColor = new BABYLON.Color3(0, 0, 0);
+					needleMeshInverting.visibility = 0;
+					needleMeshEverting.visibility = 0;
+					//needleTipArrow.visibility = 0.;closestRef.visibility = 0.;
+					break;
+			}			
+		}
+		function setIsInverting(b){
+			if(b!=isInverting){
+				isInverting = b;
+				isEverting = !b;
+				
+				needleMeshInverting.visibility = isInverting ? 0.5:.2;
+				needleMeshEverting.visibility = isEverting ? 0.5:.2;
+			}			
+		}
+		var scene = new BABYLON.Scene(engine);
+		var manager = new BABYLON.GUI.GUI3DManager(scene);
+		Writer = BABYLON.MeshWriter(scene, {scale:1})		
+		highlight = new BABYLON.HighlightLayer("hl1", scene);
+		var hLookup = 1.;
+		var isInverting = false;
+		var isEverting = false;
+		var targetList = [];
+		var textLoading = null;
+		var closestTarget = null;
+		var closestTarget = null;
+				
+		buildUI(scene);
+		
+		var advancedTexture = BABYLON.GUI.AdvancedDynamicTexture.CreateFullscreenUI('UI', undefined, undefined, BABYLON.Texture.NEAREST_NEAREST);  
+		advancedTexture.rootContainer.scaleX = window.devicePixelRatio;
+		advancedTexture.rootContainer.scaleY = window.devicePixelRatio;
+        textblock = new BABYLON.GUI.TextBlock();
+        textblock.text = "";
+        textblock.fontSize = 24;
+        textblock.top = -100;
+        textblock.color = "white";
+        advancedTexture.addControl(textblock);
+		
+		//var camera = new BABYLON.FreeCamera("camera1", new BABYLON.Vector3(0, hLookup-.1, -.3), scene);
+		var camera = new BABYLON.ArcRotateCamera("Camera", 0, 0, 10, new BABYLON.Vector3(0, hLookup, 0), scene);
+		camera.setPosition(new BABYLON.Vector3(0, hLookup, .1));
+		camera.wheelDeltaPercentage = .01;
+		camera.lowerRadiusLimit = .07;
+		camera.upperRadiusLimit = .3;
+		//camera.pinchDeltaPercentage = .0001;
+		camera.minZ = .01;
+		camera.zfar = 166;
+		camera.znear = 5;
+		//camera.setTarget(new BABYLON.Vector3(0, hLookup, 0));
+		camera.attachControl(canvas, true);
+		var light = new BABYLON.HemisphericLight("light1", new BABYLON.Vector3(0, 1, 0), scene);
+		light.intensity = 0.7;
+		
+		// Create  gizmo
+		var utilLayer = new BABYLON.UtilityLayerRenderer(scene);
+		utilLayer.utilityLayerScene.autoClearDepthAndStencil = false;
+		
+		Promise.all([BABYLON.SceneLoader.ImportMeshAsync(null, "meshes/", "BasicSkills.glb?v=1", scene)
+			//BABYLON.SceneLoader.ImportMeshAsync(null, "","https://raw.githubusercontent.com/PhilGauthier/static/main/AnatomyAll.glb", scene)
+				.then((res) => {
+					textLoading.setEnabled(false);
+					res.meshes[0].name = 'SkinRoot';
+					root = res.meshes[0];
+					root.scalingDeterminant = 3;
+					orientMeshTip = scene.getMeshByName("Gradient");
+					needleHolderTip = scene.getMeshByName("NeedleHolderTip");
+					needleHolderTip.isVisible = false;
+					needleTip = scene.getNodeByName("NeedleTip");
+					needleHolderMesh = scene.getMeshByName("NeedleHolderMesh");
+					needleMesh = scene.getMeshByName("NeedleMesh");
+					needleMeshInverting = scene.getMeshByName("NeedleMeshInverting");				
+					needleMeshEverting = scene.getMeshByName("NeedleMeshEverting");
+					//const a = create3DAxes(scene,'base',.015);a.isPickable=false;a.parent = needleMesh;
+					//const b = create3DAxes(scene,'base',.015);b.isPickable=false;b.parent = needleMeshInverting;
+					armatureRight = scene.getNodeByName("ArmatureRight");
+					armatureRight = scene.getNodeByName("ArmatureLeft");
+					
+					skinGap = scene.getMeshByName("SkinGap");
+					skinMeshRight = scene.getNodeByName("SkinMeshRight");
+					skinMeshLeft = scene.getNodeByName("SkinMeshLeft");
+
+					
+					needleHolderBones = [scene.getNodeByName("NeedleHolderBoneStart"),scene.getNodeByName("NeedleHolderBoneEnd")];
+					// Open NeedleHolder
+					needleHolderMesh.morphTargetManager.getTarget(0).influence = 1.;
+					/*scene.getNodeByName("RightBoneStart.008").position.z +=	.002;
+					scene.getNodeByName("RightBoneStart.015").position.z += .002;
+					scene.getNodeByName("LeftBoneStart.008").position.z +=	.002;
+					scene.getNodeByName("LeftBoneStart.015").position.z += 	.002;					
+*/
+					//needleTipArrow = createArrow(scene,'needleTipAxes',-.5,new BABYLON.Color3(1, 1, 1));needleTipArrow.isPickable = false;needleTipArrow.parent = needleTip;needleTipArrow.scalingDeterminant =0;
+					
+					targetsRightNode = scene.getNodeByName("targetsRight");
+					targetList = targetsRightNode.getChildMeshes();
+					
+					setInterval(updateClosestTarget, 500);
+					//closestRef = createArrow(scene,'closestRef',-.01,new BABYLON.Color3(1, 1, 1));closestRef.position.y+=.01;closestRef.isPickable = false;
+					
+					//gradientPixels
+					makeGradient(scene,"Gradient (Base Color)");
+					
+					setCurrentStep(0);
+			}),
+			]).then(() => {				
+				root.position.y += hLookup;
+				// Restrict gizmos to only spheres				
+		});		
+		
+		scene.onPointerObservable.add((pointerInfo) => {			
+			switch (pointerInfo.type) {			
+				case BABYLON.PointerEventTypes.POINTERDOWN:
+					var pickResult = pointerInfo.pickInfo;
+					if (pickResult.hit) {
+						//console.log('POINTERDOWN');
+					}
+					break;
+				case BABYLON.PointerEventTypes.POINTERPICK:					
+					var pickResult = pointerInfo.pickInfo;
+					if (pickResult.hit) {
+						//console.log('POINTERPICK');
+					}
+					break;
+        }
+        
+    });
+		
+		var time = 0.;		
+		scene.registerBeforeRender(function() {			
+			time +=0.05;
+							
+			//for(i=0;i<8;i++){scene.getNodeByName("SkinBoneStart."+i.toString().padStart(3,'0')).position.z += Math.sin(time+i*.3)*.0001;}
+			//for(i=9;i<15;i++){scene.getNodeByName("SkinBoneStart."+i.toString().padStart(3,'0')).position.z += Math.sin(time+i*.3)*.00005;}
+			
+			if(needleGrabbed){				
+				//var dRot = distanceRot(needleTipArrow,closestRef);
+				//needleTipArrow.material.emissiveColor = getGradientColor(dRot);
+				needleInRight = needleMesh.intersectsMesh(skinMeshRight, true);
+				needleInLeft = needleMesh.intersectsMesh(skinMeshLeft, true);
+				needleInGap = needleMesh.intersectsMesh(skinGap, true);
+				
+				
+				skinMeshRight.visibility = needleInRight?.5:1.;
+				skinMeshLeft.visibility = needleInLeft?.5:1.;
+				
+				if(currentStep == 1){
+					var dInverting = distanceRot(needleMesh,needleMeshInverting);
+					var dEverting = distanceRot(needleMesh,needleMeshEverting);
+					var dMin = Math.min(dInverting,dEverting);
+					setIsInverting(dMin==dInverting);
+					var dRot = smoothstep(0.001,.04,dMin);					
+					needleMesh.material.emissiveColor = getGradientColor(dRot);
+					
+					//var d = closestRef.absolutePosition.y - needleTipArrow.absolutePosition.y;						needleTipArrow.scalingDeterminant = d;
+					
+					if(needleInRight)
+						setCurrentStep(2);
+				}
+				else if(currentStep == 2 && ! needleInRight && ! needleInLeft){							
+					setCurrentStep(1);							
+				}
+			}
+			
+			//scene.getNodeByName("SkinBoneMid.001").rotate(BABYLON.Axis.X, Math.sin(time)*.01, BABYLON.Space.BONE );
+			//scene.getNodeByName("SkinBoneEnd.001").rotate(BABYLON.Axis.X, Math.sin(time)*.01, BABYLON.Space.BONE );
+			
+			//skinBones[1].rotate(BABYLON.Axis.X, Math.sin(time)*.01, BABYLON.Space.BONE );
+			//skinBones[2].rotate(BABYLON.Axis.X, Math.sin(time)*.01, BABYLON.Space.BONE );
+			//armatureRight.getChildren()[1].getChildren()[0].getChildren()[0].rotate(BABYLON.Axis.X, 0.1, BABYLON.Space.WORLD, skinMeshRight);
+			/*test = armatureRight.getChildren()[1].getChildren()[0].getChildren()[0];
+			test2 = skinSkeleton.bones[2];
+			test2.rotate(BABYLON.Axis.X, 0.1, BABYLON.Space.WORLD, skinMeshRight);
+			
+			//skinSkeleton.bones[1].rotation.x = Math.sin(time)*30;				
+			
+			//needleHolderBones[1].rotate(BABYLON.Axis.Z, Math.sin(time)*.01, BABYLON.Space.BONE );
+			*/
+			//skinMeshRight.morphTargetManager.getTarget(0).influence = Math.sin(time);
+			
+		});
+
+		var ground = BABYLON.MeshBuilder.CreateGround("ground", {width:10, height:10});			
+		const xr = await scene.createDefaultXRExperienceAsync({floorMeshes: [ground],disableTeleportation: true, inputOptions: {
+            doNotLoadControllerMeshes: true
+        }});
+		xr.baseExperience.onStateChangedObservable.add((state) => {
+			switch (state) {
+				case BABYLON.WebXRState.IN_XR:
+					break;
+				case BABYLON.WebXRState.ENTERING_XR:
+					break;
+				case BABYLON.WebXRState.EXITING_XR:
+					break;
+				case BABYLON.WebXRState.NOT_IN_XR:				
+					break;
+			}
+		});
+		
+		xr.input.onControllerAddedObservable.add((controller) => {
+			controller.onMotionControllerInitObservable.add((motionController) => {				
+				const xr_ids = motionController.getComponentIds();
+				let grabComponent = motionController.getComponent(xr_ids[1]);
+				grabComponent.onButtonStateChangedObservable.add(() => {
+					if(Date.now() - needleGrabbedTime > 1000){
+						if (!needleGrabbed && grabComponent.pressed && grabComponent.value> .8) {
+							GrabNeedle(needleHolderTip.intersectsMesh(needleMesh, true));
+						}
+						else if (needleGrabbed && grabComponent.pressed && grabComponent.value> .5) {
+							GrabNeedle(false,null);
+						}
+					}
+					var openness = 0;
+					if(!needleGrabbed)						
+						openness = 1.-grabComponent.value;
+					
+					needleHolderMesh.morphTargetManager.getTarget(0).influence = openness;					
+				});
+				/*
+				let thumbstickComponent = motionController.getComponent(xr_ids[2]);//xr-standard-thumbstick
+				thumbstickComponent.onAxisValueChangedObservable.add((axes) => {
+					if(root!=null){
+						root.rotate(BABYLON.Axis.Y, axes.x*.04, BABYLON.Space.WORLD);
+						root.rotate(BABYLON.Axis.X, -axes.y*.04, BABYLON.Space.WORLD);
+					}
+				});
+				*/
+				
+				if (controller.inputSource.handedness === 'right' && controller.grip!=null) {
+					//const handle = BABYLON.MeshBuilder.CreateCylinder('handle', {height: 0.4, diameter: 0.02, tessellation: 8});
+					//console.log(controller.pointer);
+					
+					//controller.pointer.dispose();
+					needleHolderMesh.resetLocalMatrix();					
+					needleHolderTip.setParent(needleHolderMesh);
+					//needleHolderMesh.rotate(BABYLON.Axis.X, Math.PI/2 );needleHolderMesh.rotate(BABYLON.Axis.Y, 3./2.*Math.PI );
+					needleHolderMesh.parent = controller.grip;
+					//needleHolderMesh.translate(BABYLON.Axis.X, .02, BABYLON.Space.LOCAL);
+					needleHolderMesh.isPickable=false;					
+
+					//const a = create3DAxes(scene,'base',.025);a.isPickable=false;a.parent = controller.grip;
+					//rcontroller.pointer.rotate(BABYLON.Axis.Z, Math.PI/2 );
+				}
+			});
+		});
+		xr.input.onControllerRemovedObservable.add(() => {
+			needleHolderMesh.setParent(null);
+		});
+		
+		scene.debugLayer.show();// Debug
+	
+		return scene;
+	};
+	window.initFunction = async function() {		
+		var asyncEngineCreation = async function() {
+			try {
+			return createDefaultEngine();
+			} catch(e) {
+			//console.log("the available createEngine function failed. Creating the default engine instead");
+			return createDefaultEngine();
+			}
+		}
+
+		window.engine = await asyncEngineCreation();
+		if (!engine) throw 'engine should not be null.';
+		startRenderLoop(engine, canvas);
+		window.scene = createScene();
+	};
+	initFunction().then(() => {
+		scene.then(returnedScene => { sceneToRender = returnedScene; });                            
+	});
+
+	// Resize
+	window.addEventListener("resize", function () {
+		engine.resize();
+	});
+</script>
+</body>
+</html>
